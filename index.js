@@ -1,15 +1,22 @@
 import fs from 'fs';
 import { pipeline } from "@huggingface/transformers";
-// import { normalize } from 'path';
+import pg from 'pg';
+import crypto from 'crypto';
+import path from 'path';
 import 'dotenv/config';
 // config();
 // console.log(process.env.GROQ_API_KEY);
 
-
+// console.log(process.env.DATABASE_URL);
+// console.log(pg.Query("SELECT COUNT(*) FROM chunks"));
+const pool = new pg.Pool({connectionString:process.env.DATABASE_URL});
+// const r = await pool.query("SELECT COUNT(*) FROM chunks");
+// console.log(r.rows);
+// console.log(process.env.DATABASE_URL?.replace(/:[^:@]*@/, ":****@"));
 // const extractor = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2");
 // step 1 chunking 
 
-const text = fs.readFileSync('./docs/sample.txt','utf-8');
+// const text = fs.readFileSync('./docs/sample.txt','utf-8');
 
 function chunkText(text, size = 200, overlap = 50){
     const chunks = [];
@@ -30,12 +37,12 @@ async function embed(str) {
     return Array.from(out.data);
 }
 
-const chunks = chunkText(text);
-const vectorStore = [];
-for (const chunk of chunks) {
-  vectorStore.push({ text: chunk, vector: await embed(chunk) });
-}
-console.log(`Indexed ${vectorStore.length} chunks.\n`);
+// const chunks = chunkText(text);
+// const vectorStore = [];
+// for (const chunk of chunks) {
+//   vectorStore.push({ text: chunk, vector: await embed(chunk) });
+// }
+// console.log(`Indexed ${vectorStore.length} chunks.\n`);
 // console.log(vectorStore);
  
 function similarity(a, b) {
@@ -52,13 +59,22 @@ function similarity(a, b) {
 // similarity(q, await embed("Internet bill reimbursement is capped at 1000 rupees"));
 // similarity(q, await embed("The probation period is 3 months"));
 
-async function retrieve(questions, topK = 3) {
-    const qVec = await embed(questions);
-    return vectorStore
-        .map((item) => ({ text: item.text, score: similarity(qVec, item.vector) }))
-        .sort((a, b) => b.score - a.score)
-        .filter((e) => e.score >= 0.05)
-        .slice(0, topK);
+async function retrieve(question, topK = 3) {
+    const qVec = await embed(question);
+    const vecStr = `[${qVec.join(",")}]`;
+
+    const { rows } = await pool.query(
+        `SELECT c.content, d.source, 1 - (c.embedding <=> $1) AS score
+         FROM chunks c
+         JOIN documents d ON d.id = c.document_id
+         ORDER BY c.embedding <=> $1
+         LIMIT $2`,
+        [vecStr, topK]
+    );
+
+    return rows
+        .map(r => ({ text: r.content, source: r.source, score: Number(r.score) }))
+        .filter(r => r.score >= 0.05);
 }
 
 // const results = await retrieve("How many leave days do I get?");
@@ -66,7 +82,7 @@ async function retrieve(questions, topK = 3) {
 
 function buildPrompt(question, contextChunks) {
     const context = contextChunks.map((c, i) => `[${i + 1}] ${c.text}`).join("\n\n");
-    return `Answer the question with long response using ONLY the context below.
+    return `Answer the question with response using ONLY the context below.
     If the answer is not in the context, say "I don't know".
     
     Context:
@@ -112,4 +128,67 @@ async function ask(question){
 
     console.log("LLM: ", await askLLM(prompt));
 }
-await ask("Hello there, what does this company do?");
+// await ask("Hello there, what does this company do?");
+
+
+async function indexFile(filePath) {
+    const source = path.basename(filePath);
+    const fileText = fs.readFileSync(filePath, 'utf-8');
+    const hash = crypto.createHash('sha256').update(fileText).digest('hex');
+
+    // Is this file already indexed, and is it unchanged?
+    const existing = await pool.query(
+        "SELECT id, content_hash FROM documents WHERE source = $1", [source]
+    );
+    if (existing.rows.length && existing.rows[0].content_hash === hash) {
+        console.log(`${source}: unchanged, skipping.`);
+        return;
+    }
+
+    // Do the slow work (embedding) BEFORE touching the database
+    const chunks = chunkText(fileText);
+    const vectors = [];
+    for (const chunk of chunks) vectors.push(await embed(chunk));
+
+    // Write everything in one transaction: all or nothing
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+
+        if (existing.rows.length) {
+            // File was edited: remove the old version (chunks go with it)
+            await client.query("DELETE FROM documents WHERE id = $1", [existing.rows[0].id]);
+        }
+
+        const doc = await client.query(
+            "INSERT INTO documents (source, content_hash) VALUES ($1, $2) RETURNING id",
+            [source, hash]
+        );
+        const documentId = doc.rows[0].id;
+
+        for (let i = 0; i < chunks.length; i++) {
+            await client.query(
+                "INSERT INTO chunks (document_id, chunk_index, content, embedding) VALUES ($1, $2, $3, $4)",
+                [documentId, i, chunks[i], `[${vectors[i].join(",")}]`]
+            );
+        }
+
+        await client.query("COMMIT");
+        console.log(`${source}: indexed ${chunks.length} chunks.`);
+    } catch (e) {
+        await client.query("ROLLBACK");
+        throw e;
+    } finally {
+        client.release();
+    }
+}
+
+async function indexAll(folder = './docs') {
+    for (const file of fs.readdirSync(folder)) {
+        if (file.endsWith('.txt')) await indexFile(path.join(folder, file));
+    }
+}
+
+await indexAll();
+await ask("how many leave days do i get?");
+await pool.end();

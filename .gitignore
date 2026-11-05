@@ -1,2 +1,74 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Environment and local configuration
 .env
-node_modules
+.env.*
+!.env.example
+*.local
+
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Production and test output
+dist/
+build/
+out/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# Tool and framework caches
+.cache/
+.eslintcache
+.stylelintcache
+.parcel-cache/
+.turbo/
+.next/
+.nuxt/
+.vite/
+
+# Temporary files and local data
+tmp/
+temp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*.swn
+*.sqlite
+*.sqlite3
+*.db
+
+# Local containers and infrastructure overrides
+docker-compose.override.yml
+
+# IDE settings
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Operating-system files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Local certificates and private keys
+*.pem
+*.key
+*.p12
+*.pfx
